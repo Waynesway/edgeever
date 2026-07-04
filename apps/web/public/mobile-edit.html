@@ -93,6 +93,21 @@
         gap: 8px;
       }
 
+      .tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .tool-button {
+        border: 1px solid #cbd5e1;
+        background: #fff;
+        color: #334155;
+        font-size: 14px;
+        min-height: 34px;
+        padding: 6px 12px;
+      }
+
       input,
       textarea {
         width: 100%;
@@ -165,6 +180,12 @@
       <div class="meta">
         <input class="tags" id="tags" autocomplete="on" autocorrect="on" inputmode="text" placeholder="添加标签，用逗号分隔" />
       </div>
+      <div class="tools">
+        <button class="tool-button" id="upload-image" type="button">图片</button>
+        <button class="tool-button" id="upload-file" type="button">附件</button>
+      </div>
+      <input id="image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden />
+      <input id="file-input" type="file" hidden />
       <textarea id="body" autocomplete="on" autocorrect="on" inputmode="text" enterkeyhint="enter" autofocus placeholder="开始记录..."></textarea>
     </main>
 
@@ -181,6 +202,10 @@
       const errorNode = document.getElementById("error");
       const doneButton = document.getElementById("done");
       const backButton = document.getElementById("back");
+      const uploadImageButton = document.getElementById("upload-image");
+      const uploadFileButton = document.getElementById("upload-file");
+      const imageInput = document.getElementById("image-input");
+      const fileInput = document.getElementById("file-input");
       let memo = null;
       let dirty = false;
       let saving = false;
@@ -309,6 +334,61 @@
         return response.json();
       };
 
+      const uploadResource = async (file) => {
+        if (!memo || !file) return;
+        const form = new FormData();
+        form.append("file", file);
+        setStatus("上传中", "saving");
+        uploadImageButton.disabled = true;
+        uploadFileButton.disabled = true;
+        clearError();
+
+        try {
+          const response = await fetch(`/api/v1/memos/${encodeURIComponent(memo.id)}/resources`, {
+            method: "POST",
+            credentials: "include",
+            body: form,
+          });
+
+          if (!response.ok) {
+            const body = await response.json().catch(() => null);
+            throw new Error(body && body.error && body.error.message ? body.error.message : response.statusText);
+          }
+
+          const data = await response.json();
+          insertResourceMarkdown(data.resource);
+          scheduleSave();
+          void saveNow();
+        } catch (error) {
+          showError(error && error.message ? error.message : "上传失败");
+        } finally {
+          uploadImageButton.disabled = false;
+          uploadFileButton.disabled = false;
+        }
+      };
+
+      const insertResourceMarkdown = (resource) => {
+        if (!resource || !resource.url) return;
+        const filename = resource.filename || "附件";
+        const text =
+          resource.kind === "image"
+            ? `![${escapeMarkdownLabel(filename)}](${resource.url})`
+            : `附件：${filename}\\n${resource.url}`;
+        insertAtCursor(`\\n\\n${text}\\n\\n`);
+      };
+
+      const insertAtCursor = (text) => {
+        const start = bodyInput.selectionStart || 0;
+        const end = bodyInput.selectionEnd || start;
+        const value = bodyInput.value;
+        bodyInput.value = `${value.slice(0, start)}${text}${value.slice(end)}`;
+        const nextCursor = start + text.length;
+        bodyInput.focus();
+        bodyInput.setSelectionRange(nextCursor, nextCursor);
+      };
+
+      const escapeMarkdownLabel = (value) => String(value).replace(/\]/g, "\\]");
+
       const saveNow = async ({ keepalive = false } = {}) => {
         if (!memo) return false;
         if (saving) return currentSavePromise || false;
@@ -420,6 +500,18 @@
 
       doneButton.addEventListener("click", () => void leavePage());
       backButton.addEventListener("click", () => void leavePage());
+      uploadImageButton.addEventListener("click", () => imageInput.click());
+      uploadFileButton.addEventListener("click", () => fileInput.click());
+      imageInput.addEventListener("change", () => {
+        const file = imageInput.files && imageInput.files[0];
+        imageInput.value = "";
+        void uploadResource(file);
+      });
+      fileInput.addEventListener("change", () => {
+        const file = fileInput.files && fileInput.files[0];
+        fileInput.value = "";
+        void uploadResource(file);
+      });
       window.history.replaceState({ edgeeverMobileEditor: true }, "");
       window.history.pushState({ edgeeverMobileEditorBackGuard: true }, "");
       window.addEventListener("popstate", () => {
