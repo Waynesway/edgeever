@@ -49,7 +49,7 @@ The current deployment target is a Cloudflare Worker:
 - D1 stores notebook, memo, memo content, and resource metadata
 - R2 stores images and attachment objects
 
-The core README gives a personal-use estimate of roughly 100,000 short notes or about 50,000 200 KB images. Actual usage and cost still depend on your Cloudflare account plan and Cloudflare's current pricing.
+The core README gives a personal-use estimate of roughly 150,000 short notes or about 50,000 200 KB images. Actual usage and cost still depend on your Cloudflare account plan and Cloudflare's current pricing.
 
 ### 4. Browser-side image compression and PWA
 

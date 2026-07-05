@@ -49,7 +49,7 @@ content_text      搜索、摘要和索引使用
 - D1 保存 notebooks、memos、memo_contents、resources 元数据等
 - R2 保存图片和附件对象
 
-核心 README 中给出的个人使用估算是：短笔记可达 10 万条量级，200KB 图片约可存放 5 万张。实际用量和费用仍以 Cloudflare 账号计划与官方定价为准。
+核心 README 中给出的个人使用估算是：短笔记可达 15 万条，200KB 图片约可存放 5 万张。实际用量和费用仍以 Cloudflare 账号计划与官方定价为准。
 
 ### 4. Web 端图片压缩与 PWA
 
