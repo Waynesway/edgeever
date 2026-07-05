@@ -22,8 +22,6 @@ The public demo resets daily and restores sample notes. Do not store private con
 
 ## Deployment
 
-Fork this repository to your own GitHub account first, then deploy from your fork. When EdgeEver ships updates, you can use GitHub's **Sync fork** button and redeploy to Cloudflare.
-
 ### Deploy with an AI Agent
 
 Copy this prompt into your AI coding assistant, such as Claude Code, Codex, Antigravity, Cursor, or Trae:
@@ -35,6 +33,8 @@ After the fork is ready, use the forked repository to install and deploy EdgeEve
 ```
 
 Agents should follow [AI Agent Cloudflare Deployment](docs/agent-deploy-cloudflare.md).
+
+> Common pitfall: Cloudflare R2, D1, and Workers may still require a Visa card during activation or usage, even when you stay within the free quotas.
 
 ### Manual Deployment
 
