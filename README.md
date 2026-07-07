@@ -39,58 +39,8 @@ Agents should follow [AI Agent Cloudflare Deployment](docs/agent-deploy-cloudfla
 
 ### Manual Deployment
 
-1. Fork the official repository:
+Please refer to the [Cloudflare Manual Deployment Guide](docs/manual-deploy.en-US.md) for step-by-step instructions on manual installation and updating.
 
-   ```text
-   https://github.com/tianma-if/edgeever
-   ```
-
-2. Clone your fork:
-
-   ```sh
-   git clone <your fork repository URL>
-   cd edgeever
-   ```
-
-3. Deploy with the helper commands:
-
-   ```sh
-   cp .env.local.example .env.local
-   bun install
-   EDGE_EVER_PASSWORD='<your password>' bun run deploy:setup
-   bun run deploy:doctor
-   bun run deploy
-   ```
-
-If you prefer creating Cloudflare resources manually:
-
-```sh
-cp .env.local.example .env.local
-bun install
-bunx wrangler d1 create edgeever
-bunx wrangler r2 bucket create edgeever-resources
-bun run auth:hash -- <your password>
-bun run deploy
-```
-
-Put the returned D1 `database_id` and password hash into your local `.env.local`.
-
-## Updating
-
-If you deployed from a fork:
-
-1. Open your EdgeEver fork on GitHub.
-2. Click **Sync fork** to pull the latest official code.
-3. Redeploy locally:
-
-   ```sh
-   git pull
-   bun install
-   bun run deploy:doctor
-   bun run deploy
-   ```
-
-Syncing the fork only updates your GitHub repository. You still need to redeploy for the Cloudflare instance to change.
 
 ## Features
 

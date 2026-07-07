@@ -41,58 +41,8 @@ Agent 应优先按 [AI Agent Cloudflare Deployment](docs/agent-deploy-cloudflare
 
 ### 手动部署
 
-1. Fork 官方仓库：
+关于手动安装和更新的详细步骤，请参考 [Cloudflare 手动部署指南](docs/manual-deploy.md)。
 
-   ```text
-   https://github.com/tianma-if/edgeever
-   ```
-
-2. Clone 你自己的 Fork 仓库：
-
-   ```sh
-   git clone <你的 Fork 仓库 URL>
-   cd edgeever
-   ```
-
-3. 使用自动化辅助命令部署：
-
-   ```sh
-   cp .env.local.example .env.local
-   bun install
-   EDGE_EVER_PASSWORD='<你的密码>' bun run deploy:setup
-   bun run deploy:doctor
-   bun run deploy
-   ```
-
-如果你想手动创建 Cloudflare 资源，也可以使用 CLI：
-
-```sh
-cp .env.local.example .env.local
-bun install
-bunx wrangler d1 create edgeever
-bunx wrangler r2 bucket create edgeever-resources
-bun run auth:hash -- <你的密码>
-bun run deploy
-```
-
-把 D1 创建命令返回的 `database_id` 和密码 hash 填入本机 `.env.local`。
-
-## 更新到最新版
-
-如果你是通过 Fork 部署的：
-
-1. 打开你自己的 EdgeEver Fork 仓库。
-2. 点击 GitHub 页面上的 **Sync fork**，同步官方仓库的最新代码。
-3. 回到本地项目目录重新部署：
-
-   ```sh
-   git pull
-   bun install
-   bun run deploy:doctor
-   bun run deploy
-   ```
-
-同步 Fork 只会更新你 GitHub 仓库里的代码，不会自动更新已经部署到 Cloudflare 的实例。同步后必须重新执行部署命令，更新才会生效。
 
 ## 功能
 
