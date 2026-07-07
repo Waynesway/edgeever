@@ -1389,7 +1389,7 @@ export const WorkspaceApp = ({
         queryClient.invalidateQueries({ queryKey: ["memos"], refetchType }),
         queryClient.invalidateQueries({ queryKey: ["memo"], refetchType }),
         queryClient.invalidateQueries({ queryKey: ["notebooks"], refetchType }),
-        queryClient.invalidateQueries({ queryKey: ["resources"], refetchType: "inactive" }),
+        queryClient.invalidateQueries({ queryKey: ["resources"], refetchType: _error ? "active" : "all" }),
       ]);
     },
   });
@@ -1440,7 +1440,7 @@ export const WorkspaceApp = ({
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["memos"], refetchType }),
         queryClient.invalidateQueries({ queryKey: ["notebooks"], refetchType }),
-        queryClient.invalidateQueries({ queryKey: ["resources"], refetchType: "inactive" }),
+        queryClient.invalidateQueries({ queryKey: ["resources"], refetchType: _error ? "active" : "all" }),
       ]);
     },
   });
@@ -1469,6 +1469,7 @@ export const WorkspaceApp = ({
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["memos"] }),
         queryClient.invalidateQueries({ queryKey: ["notebooks"] }),
+        queryClient.invalidateQueries({ queryKey: ["resources"], refetchType: "all" }),
       ]);
       setSelectedNotebookId(data.memo.notebookId);
       navigateWorkspaceHome();

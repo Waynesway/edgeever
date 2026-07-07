@@ -1598,6 +1598,11 @@ app.delete("/api/v1/memos/:id", async (c) => {
        SET is_deleted = 1, deleted_at = ?, updated_at = ?
        WHERE id = ? AND is_deleted = 0`
     ).bind(now, now, id),
+    c.env.DB.prepare(
+      `UPDATE resources
+       SET is_deleted = 1, deleted_at = ?, updated_at = ?
+       WHERE memo_id = ? AND is_deleted = 0`
+    ).bind(now, now, id),
     c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
     auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.delete", "memo", id, {}),
   ]);
@@ -1635,6 +1640,11 @@ app.post("/api/v1/memos/:id/restore", async (c) => {
        SET notebook_id = ?, is_deleted = 0, deleted_at = NULL, updated_at = ?
        WHERE id = ? AND is_deleted = 1`
     ).bind(restoreNotebookId, now, id),
+    c.env.DB.prepare(
+      `UPDATE resources
+       SET is_deleted = 0, deleted_at = NULL, updated_at = ?
+       WHERE memo_id = ? AND is_deleted = 1`
+    ).bind(now, id),
     c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
     c.env.DB.prepare(
       `INSERT INTO memos_fts (memo_id, title, content_text, tags)
@@ -3280,6 +3290,13 @@ const deleteMemosRecord = async (
           `UPDATE memos
            SET is_deleted = 1, deleted_at = ?, updated_at = ?
            WHERE is_deleted = 0 AND id IN (${placeholders})`
+        )
+        .bind(now, now, ...uniqueMemoIds),
+      db
+        .prepare(
+          `UPDATE resources
+           SET is_deleted = 1, deleted_at = ?, updated_at = ?
+           WHERE is_deleted = 0 AND memo_id IN (${placeholders})`
         )
         .bind(now, now, ...uniqueMemoIds),
       db.prepare(`DELETE FROM memos_fts WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds)
