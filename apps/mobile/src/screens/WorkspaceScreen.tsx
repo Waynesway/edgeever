@@ -6,6 +6,7 @@ import {
   Check,
   FileText,
   Folder,
+  History,
   Home,
   LogOut,
   Merge,
@@ -16,6 +17,7 @@ import {
   RotateCcw,
   Search,
   Settings,
+  Tag,
   Trash2,
   UserRound,
   X,
@@ -34,7 +36,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import type { MemoDetail, MemoSummary, Notebook } from "@edgeever/shared";
+import type { MemoDetail, MemoRevision, MemoSummary, Notebook, TagSummary } from "@edgeever/shared";
 import { useSession } from "../lib/session";
 
 const ALL_NOTES_ID = "all";
@@ -56,6 +58,8 @@ export const WorkspaceScreen = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [editingMemo, setEditingMemo] = useState<MemoDetail | null>(null);
   const [notebookManagerOpen, setNotebookManagerOpen] = useState(false);
+  const [tagsManagerOpen, setTagsManagerOpen] = useState(false);
+  const [revisionMemo, setRevisionMemo] = useState<MemoDetail | null>(null);
   const [selectedMemoIds, setSelectedMemoIds] = useState<Set<string>>(() => new Set());
   const [selectionMoveOpen, setSelectionMoveOpen] = useState(false);
 
@@ -408,7 +412,14 @@ export const WorkspaceScreen = () => {
       ) : null}
 
       {activeView === "account" ? <AccountView instance={session?.baseUrl ?? ""} userName={session?.user?.username ?? "owner"} onSignOut={signOut} /> : null}
-      {activeView === "settings" ? <SettingsView notebookCount={notebooks.length} memoCount={memoCount} onOpenNotebookManager={() => setNotebookManagerOpen(true)} /> : null}
+      {activeView === "settings" ? (
+        <SettingsView
+          notebookCount={notebooks.length}
+          memoCount={memoCount}
+          onOpenNotebookManager={() => setNotebookManagerOpen(true)}
+          onOpenTagsManager={() => setTagsManagerOpen(true)}
+        />
+      ) : null}
 
       <MemoDetailModal
         isDeleting={deleteMemoMutation.isPending}
@@ -419,6 +430,7 @@ export const WorkspaceScreen = () => {
         onClose={closeDetail}
         onDelete={handleDeleteMemo}
         onEdit={setEditingMemo}
+        onOpenRevisions={setRevisionMemo}
         onRestore={(memo) => restoreMemoMutation.mutate(memo)}
         onTogglePin={handleTogglePin}
         visible={Boolean(selectedMemoId)}
@@ -436,6 +448,15 @@ export const WorkspaceScreen = () => {
       />
 
       <NotebookManagerModal notebooks={notebooks} onClose={() => setNotebookManagerOpen(false)} visible={notebookManagerOpen} />
+      <TagsManagerModal onClose={() => setTagsManagerOpen(false)} visible={tagsManagerOpen} />
+      <RevisionHistoryModal
+        memo={revisionMemo}
+        onClose={() => setRevisionMemo(null)}
+        onRestored={(memo) => {
+          setRevisionMemo(null);
+          setSelectedMemoId(memo.id);
+        }}
+      />
 
       <CreateMemoModal
         activeNotebookId={activeNotebookId}
@@ -726,11 +747,24 @@ const AccountView = ({ instance, userName, onSignOut }: { instance: string; user
   </ScrollView>
 );
 
-const SettingsView = ({ memoCount, notebookCount, onOpenNotebookManager }: { memoCount: number; notebookCount: number; onOpenNotebookManager: () => void }) => (
+const SettingsView = ({
+  memoCount,
+  notebookCount,
+  onOpenNotebookManager,
+  onOpenTagsManager,
+}: {
+  memoCount: number;
+  notebookCount: number;
+  onOpenNotebookManager: () => void;
+  onOpenTagsManager: () => void;
+}) => (
   <ScrollView contentContainerStyle={styles.panelList} style={styles.viewBody}>
     <Text style={styles.sectionTitle}>设置</Text>
     <Pressable onPress={onOpenNotebookManager}>
       <PanelRow label="笔记本管理" value="创建、重命名、删除" />
+    </Pressable>
+    <Pressable onPress={onOpenTagsManager}>
+      <PanelRow label="标签管理" value="重命名、删除标签" />
     </Pressable>
     <PanelRow label="移动端形态" value="React Native" />
     <PanelRow label="笔记本数量" value={String(notebookCount)} />
@@ -1000,6 +1034,314 @@ const NotebookManagerModal = ({ notebooks, onClose, visible }: { notebooks: Note
   );
 };
 
+const TagsManagerModal = ({ onClose, visible }: { onClose: () => void; visible: boolean }) => {
+  const { client } = useSession();
+  const queryClient = useQueryClient();
+  const [editingTagName, setEditingTagName] = useState<string | null>(null);
+  const [editingTagValue, setEditingTagValue] = useState("");
+
+  const tagsQuery = useQuery({
+    queryKey: ["mobile", "tags"],
+    queryFn: async () => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      return client.listTags();
+    },
+    enabled: Boolean(client && visible),
+  });
+
+  const invalidateTagsAndMemos = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["mobile", "tags"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memo"] }),
+    ]);
+  };
+
+  const renameTagMutation = useMutation({
+    mutationFn: async ({ tag, name }: { tag: string; name: string }) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const trimmed = name.trim();
+
+      if (!trimmed) {
+        throw new Error("请输入标签名称");
+      }
+
+      return client.renameTag(tag, trimmed);
+    },
+    onSuccess: async () => {
+      setEditingTagName(null);
+      setEditingTagValue("");
+      await invalidateTagsAndMemos();
+    },
+  });
+
+  const deleteTagMutation = useMutation({
+    mutationFn: async (tag: string) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      return client.deleteTag(tag);
+    },
+    onSuccess: invalidateTagsAndMemos,
+  });
+
+  const requestDeleteTag = (tag: TagSummary) => {
+    Alert.alert("删除标签？", `将从 ${tag.memoCount} 条笔记中移除 #${tag.name}。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: () => deleteTagMutation.mutate(tag.name),
+      },
+    ]);
+  };
+
+  const tags = tagsQuery.data?.tags ?? [];
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
+      <SafeAreaView style={styles.modalSafeArea}>
+        <View style={styles.modalHeader}>
+          <IconButton onPress={onClose}>
+            <X color="#0f172a" size={20} />
+          </IconButton>
+          <Text style={styles.modalTitle}>标签管理</Text>
+          <View style={styles.iconButtonPlaceholder} />
+        </View>
+
+        {tagsQuery.isLoading ? (
+          <View style={styles.centerState}>
+            <ActivityIndicator color="#0f172a" />
+          </View>
+        ) : tags.length === 0 ? (
+          <View style={styles.centerState}>
+            <Tag color="#94a3b8" size={32} />
+            <Text style={styles.emptyTitle}>暂无标签</Text>
+            <Text style={styles.mutedText}>在编辑笔记时添加标签后会显示在这里</Text>
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.editorForm}>
+            <Text style={styles.sectionSubtitle}>共 {tags.length} 个标签</Text>
+            {tags.map((tag) => {
+              const editing = editingTagName === tag.name;
+              const nextName = editingTagValue.trim();
+
+              return (
+                <View key={tag.name} style={styles.tagManageRow}>
+                  {editing ? (
+                    <TextInput
+                      autoFocus
+                      onChangeText={setEditingTagValue}
+                      placeholder="标签名称"
+                      placeholderTextColor="#94a3b8"
+                      style={[styles.titleInput, styles.inlineInput]}
+                      value={editingTagValue}
+                    />
+                  ) : (
+                    <View style={styles.notebookManageText}>
+                      <Text numberOfLines={1} style={styles.panelValue}>
+                        #{tag.name}
+                      </Text>
+                      <Text style={styles.panelLabel}>{tag.memoCount} 条笔记 · {tag.updatedAt ? formatDate(tag.updatedAt) : "未更新"}</Text>
+                    </View>
+                  )}
+
+                  {editing ? (
+                    <>
+                      <IconButton onPress={() => renameTagMutation.mutate({ tag: tag.name, name: nextName })}>
+                        {renameTagMutation.isPending ? <ActivityIndicator color="#0f172a" /> : <Check color="#0f172a" size={18} />}
+                      </IconButton>
+                      <IconButton
+                        onPress={() => {
+                          setEditingTagName(null);
+                          setEditingTagValue("");
+                        }}
+                      >
+                        <X color="#0f172a" size={18} />
+                      </IconButton>
+                    </>
+                  ) : (
+                    <>
+                      <IconButton
+                        onPress={() => {
+                          setEditingTagName(tag.name);
+                          setEditingTagValue(tag.name);
+                        }}
+                      >
+                        <Pencil color="#0f172a" size={18} />
+                      </IconButton>
+                      <IconButton onPress={() => requestDeleteTag(tag)}>
+                        <Trash2 color="#b91c1c" size={18} />
+                      </IconButton>
+                    </>
+                  )}
+                </View>
+              );
+            })}
+            {renameTagMutation.error ? (
+              <Text style={styles.errorText}>{renameTagMutation.error instanceof Error ? renameTagMutation.error.message : "重命名失败"}</Text>
+            ) : null}
+            {deleteTagMutation.error ? (
+              <Text style={styles.errorText}>{deleteTagMutation.error instanceof Error ? deleteTagMutation.error.message : "删除失败"}</Text>
+            ) : null}
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const RevisionHistoryModal = ({
+  memo,
+  onClose,
+  onRestored,
+}: {
+  memo: MemoDetail | null;
+  onClose: () => void;
+  onRestored: (memo: MemoDetail) => void;
+}) => {
+  const { client } = useSession();
+  const queryClient = useQueryClient();
+  const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
+
+  const revisionsQuery = useQuery({
+    queryKey: ["mobile", "memo-revisions", memo?.id],
+    queryFn: async () => {
+      if (!client || !memo) {
+        throw new Error("Memo is not selected");
+      }
+
+      return client.listMemoRevisions(memo.id);
+    },
+    enabled: Boolean(client && memo),
+  });
+
+  const revisions = revisionsQuery.data?.revisions ?? [];
+  const selectedRevision = revisions.find((revision) => revision.id === selectedRevisionId) ?? revisions[0] ?? null;
+  const changedLines = selectedRevision ? countChangedLines(selectedRevision.contentMarkdown, memo?.contentMarkdown ?? "") : 0;
+
+  useEffect(() => {
+    if (memo && revisions.length > 0 && !selectedRevisionId) {
+      setSelectedRevisionId(revisions[0].id);
+    }
+  }, [memo, revisions, selectedRevisionId]);
+
+  useEffect(() => {
+    if (!memo) {
+      setSelectedRevisionId(null);
+    }
+  }, [memo]);
+
+  useEffect(() => {
+    setSelectedRevisionId(null);
+  }, [memo?.id]);
+
+  const restoreRevisionMutation = useMutation({
+    mutationFn: async (revision: MemoRevision) => {
+      if (!client || !memo) {
+        throw new Error("Memo is not selected");
+      }
+
+      const response = await client.restoreMemoRevision(memo.id, revision.id);
+      return response.memo;
+    },
+    onSuccess: async (restoredMemo) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "memo"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "memo-revisions", restoredMemo.id] }),
+      ]);
+      onRestored(restoredMemo);
+    },
+  });
+
+  const requestRestoreRevision = (revision: MemoRevision) => {
+    Alert.alert("恢复此版本？", `将把笔记内容恢复到修订 ${revision.revision}。当前内容会作为新的修订保留。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "恢复",
+        onPress: () => restoreRevisionMutation.mutate(revision),
+      },
+    ]);
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={Boolean(memo)}>
+      <SafeAreaView style={styles.modalSafeArea}>
+        <View style={styles.modalHeader}>
+          <IconButton onPress={onClose}>
+            <X color="#0f172a" size={20} />
+          </IconButton>
+          <Text numberOfLines={1} style={styles.modalTitle}>
+            修订历史
+          </Text>
+          <View style={styles.iconButtonPlaceholder} />
+        </View>
+
+        {revisionsQuery.isLoading ? (
+          <View style={styles.centerState}>
+            <ActivityIndicator color="#0f172a" />
+          </View>
+        ) : revisions.length === 0 ? (
+          <View style={styles.centerState}>
+            <History color="#94a3b8" size={32} />
+            <Text style={styles.emptyTitle}>暂无历史版本</Text>
+            <Text style={styles.mutedText}>笔记保存后产生的修订会显示在这里</Text>
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.editorForm}>
+            <Text style={styles.detailTitle}>{memo?.title?.trim() || DEFAULT_MEMO_TITLE}</Text>
+            <Text style={styles.sectionSubtitle}>{selectedRevision ? `修订 ${selectedRevision.revision} · ${changedLines} 行差异` : "请选择一个修订"}</Text>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {revisions.map((revision) => (
+                <Pressable
+                  key={revision.id}
+                  onPress={() => setSelectedRevisionId(revision.id)}
+                  style={[styles.revisionPill, selectedRevision?.id === revision.id && styles.revisionPillActive]}
+                >
+                  <Text style={[styles.revisionPillTitle, selectedRevision?.id === revision.id && styles.revisionPillTitleActive]}>修订 {revision.revision}</Text>
+                  <Text style={[styles.revisionPillMeta, selectedRevision?.id === revision.id && styles.revisionPillTitleActive]}>
+                    {formatDate(revision.createdAt)} · {formatRevisionActor(revision.createdBy)}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {selectedRevision ? (
+              <>
+                <ActionButton disabled={restoreRevisionMutation.isPending || Boolean(memo?.isDeleted)} label={restoreRevisionMutation.isPending ? "恢复中" : "恢复此版本"} onPress={() => requestRestoreRevision(selectedRevision)}>
+                  <RotateCcw color="#0f172a" size={16} />
+                </ActionButton>
+                <View style={styles.revisionPreviewBlock}>
+                  <Text style={styles.label}>历史版本</Text>
+                  <Text style={styles.revisionPreviewText}>{selectedRevision.contentMarkdown || selectedRevision.contentText || "没有正文内容"}</Text>
+                </View>
+                <View style={styles.revisionPreviewBlock}>
+                  <Text style={styles.label}>当前内容</Text>
+                  <Text style={styles.revisionPreviewText}>{memo?.contentMarkdown || memo?.contentText || "没有正文内容"}</Text>
+                </View>
+              </>
+            ) : null}
+            {restoreRevisionMutation.error ? (
+              <Text style={styles.errorText}>{restoreRevisionMutation.error instanceof Error ? restoreRevisionMutation.error.message : "恢复失败"}</Text>
+            ) : null}
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
 const MemoDetailModal = ({
   isDeleting,
   isLoading,
@@ -1009,6 +1351,7 @@ const MemoDetailModal = ({
   onClose,
   onDelete,
   onEdit,
+  onOpenRevisions,
   onRestore,
   onTogglePin,
   visible,
@@ -1021,6 +1364,7 @@ const MemoDetailModal = ({
   onClose: () => void;
   onDelete: (memo: MemoDetail) => void;
   onEdit: (memo: MemoDetail) => void;
+  onOpenRevisions: (memo: MemoDetail) => void;
   onRestore: (memo: MemoDetail) => void;
   onTogglePin: (memo: MemoDetail) => void;
   visible: boolean;
@@ -1060,6 +1404,9 @@ const MemoDetailModal = ({
                 </ActionButton>
                 <ActionButton label="编辑" onPress={() => onEdit(memo)}>
                   <Pencil color="#0f172a" size={16} />
+                </ActionButton>
+                <ActionButton label="历史" onPress={() => onOpenRevisions(memo)}>
+                  <History color="#0f172a" size={16} />
                 </ActionButton>
               </>
             )}
@@ -1514,6 +1861,33 @@ const formatDate = (value: string) =>
     minute: "2-digit",
   }).format(new Date(value));
 
+const countChangedLines = (left: string, right: string) => {
+  const leftLines = left.split("\n");
+  const rightLines = right.split("\n");
+  const maxLines = Math.max(leftLines.length, rightLines.length);
+  let changed = 0;
+
+  for (let index = 0; index < maxLines; index += 1) {
+    if ((leftLines[index] ?? "") !== (rightLines[index] ?? "")) {
+      changed += 1;
+    }
+  }
+
+  return changed;
+};
+
+const formatRevisionActor = (actor: string) => {
+  if (actor.startsWith("user:")) {
+    return "user";
+  }
+
+  if (actor.startsWith("agent:")) {
+    return "agent";
+  }
+
+  return actor || "system";
+};
+
 const styles = StyleSheet.create({
   safeArea: {
     backgroundColor: "#f8fafc",
@@ -1941,6 +2315,17 @@ const styles = StyleSheet.create({
     gap: 4,
     minWidth: 0,
   },
+  tagManageRow: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 60,
+    padding: 10,
+  },
   moveNotebookRow: {
     alignItems: "center",
     backgroundColor: "#ffffff",
@@ -1964,6 +2349,48 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 18,
     paddingBottom: 48,
+  },
+  revisionPill: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    marginRight: 8,
+    minHeight: 58,
+    minWidth: 132,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  revisionPillActive: {
+    backgroundColor: "#0f172a",
+    borderColor: "#0f172a",
+  },
+  revisionPillTitle: {
+    color: "#0f172a",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  revisionPillTitleActive: {
+    color: "#ffffff",
+  },
+  revisionPillMeta: {
+    color: "#64748b",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 4,
+  },
+  revisionPreviewBlock: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 8,
+    padding: 12,
+  },
+  revisionPreviewText: {
+    color: "#334155",
+    fontSize: 13,
+    lineHeight: 20,
   },
   label: {
     color: "#334155",
