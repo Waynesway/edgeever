@@ -1,28 +1,59 @@
-import { useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Home, LogOut, Plus, RefreshCw, Search, Settings, UserRound } from "lucide-react-native";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
+import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
+import {
+  BookOpen,
+  Check,
+  FileText,
+  Home,
+  LogOut,
+  Pencil,
+  Pin,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  Trash2,
+  UserRound,
+  X,
+} from "lucide-react-native";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import type { MemoSummary, Notebook } from "@edgeever/shared";
+import type { MemoDetail, MemoSummary, Notebook } from "@edgeever/shared";
 import { useSession } from "../lib/session";
 
 const ALL_NOTES_ID = "all";
+const DEFAULT_MEMO_TITLE = "无标题笔记";
+
+type MobileView = "notes" | "search" | "account" | "settings";
+type MemoView = "notebook" | "trash";
 
 export const WorkspaceScreen = () => {
   const { client, session, signOut } = useSession();
   const queryClient = useQueryClient();
+  const [activeView, setActiveView] = useState<MobileView>("notes");
   const [activeNotebookId, setActiveNotebookId] = useState<string>(ALL_NOTES_ID);
-  const [selectedMemo, setSelectedMemo] = useState<MemoSummary | null>(null);
+  const [memoView, setMemoView] = useState<MemoView>("notebook");
+  const [memoFilterMode, setMemoFilterMode] = useState<MemoFilterMode>("all");
+  const [memoSortMode, setMemoSortMode] = useState<MemoSortMode>("updated-desc");
+  const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
+  const [searchText, setSearchText] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editingMemo, setEditingMemo] = useState<MemoDetail | null>(null);
+  const [notebookManagerOpen, setNotebookManagerOpen] = useState(false);
 
   const notebooksQuery = useQuery({
     queryKey: ["mobile", "notebooks"],
@@ -36,13 +67,11 @@ export const WorkspaceScreen = () => {
     enabled: Boolean(client),
   });
 
-  const activeNotebook = useMemo(
-    () => notebooksQuery.data?.notebooks.find((notebook) => notebook.id === activeNotebookId) ?? null,
-    [activeNotebookId, notebooksQuery.data?.notebooks]
-  );
+  const notebooks = notebooksQuery.data?.notebooks ?? [];
+  const activeNotebook = notebooks.find((notebook) => notebook.id === activeNotebookId) ?? null;
 
   const memosQuery = useQuery({
-    queryKey: ["mobile", "memos", activeNotebookId],
+    queryKey: ["mobile", "memos", memoView, activeNotebookId, memoFilterMode, memoSortMode],
     queryFn: async () => {
       if (!client) {
         throw new Error("Client is not ready");
@@ -50,109 +79,1025 @@ export const WorkspaceScreen = () => {
 
       return client.listMemos({
         notebookId: activeNotebookId === ALL_NOTES_ID ? null : activeNotebookId,
+        filter: memoFilterMode,
+        limit: 50,
+        sort: memoSortMode,
+        trash: memoView === "trash",
+      });
+    },
+    enabled: Boolean(client),
+  });
+
+  const searchQuery = useQuery({
+    queryKey: ["mobile", "search", searchText.trim()],
+    queryFn: async () => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      return client.listMemos({
+        q: searchText.trim(),
         limit: 50,
         sort: "updated-desc",
       });
     },
-    enabled: Boolean(client),
+    enabled: Boolean(client && searchText.trim().length > 0),
+  });
+
+  const memoDetailQuery = useQuery({
+    queryKey: ["mobile", "memo", memoView, selectedMemoId],
+    queryFn: async () => {
+      if (!client || !selectedMemoId) {
+        throw new Error("Memo is not selected");
+      }
+
+      return client.getMemo(selectedMemoId, { includeDeleted: memoView === "trash" });
+    },
+    enabled: Boolean(client && selectedMemoId),
   });
 
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
       queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memo"] }),
     ]);
   };
 
-  const isRefreshing = notebooksQuery.isFetching || memosQuery.isFetching;
-  const notebooks = notebooksQuery.data?.notebooks ?? [];
+  const handleMemoPress = (memoId: string) => {
+    setSelectedMemoId(memoId);
+  };
+
+  const closeDetail = () => {
+    setSelectedMemoId(null);
+  };
+
+  const memoCount = notebooks.reduce((total, notebook) => total + notebook.memoCount, 0);
   const memos = memosQuery.data?.memos ?? [];
+  const searchResults = searchQuery.data?.memos ?? [];
+  const selectedMemo = memoDetailQuery.data?.memo ?? null;
+  const isRefreshing = notebooksQuery.isFetching || memosQuery.isFetching || searchQuery.isFetching || memoDetailQuery.isFetching;
+
+  const invalidateWorkspace = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memo"] }),
+    ]);
+  };
+
+  const updateMemoMutation = useMutation({
+    mutationFn: async ({ memo, payload }: { memo: MemoDetail; payload: { title?: string; contentMarkdown?: string; isPinned?: boolean; notebookId?: string; tags?: string[] } }) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const response = await client.updateMemo(memo.id, {
+        expectedRevision: memo.revision,
+        ...payload,
+      });
+
+      return response.memo;
+    },
+    onSuccess: async (memo) => {
+      await invalidateWorkspace();
+      queryClient.setQueryData(["mobile", "memo", memoView, memo.id], { memo });
+    },
+  });
+
+  const deleteMemoMutation = useMutation({
+    mutationFn: async ({ memo, permanent }: { memo: MemoDetail; permanent: boolean }) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      await client.deleteMemo(memo.id, { permanent });
+      return { memo, permanent };
+    },
+    onSuccess: async () => {
+      await invalidateWorkspace();
+      setSelectedMemoId(null);
+    },
+  });
+
+  const restoreMemoMutation = useMutation({
+    mutationFn: async (memo: MemoDetail) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const response = await client.restoreMemo(memo.id);
+      return response.memo;
+    },
+    onSuccess: async (memo) => {
+      await invalidateWorkspace();
+      setMemoView("notebook");
+      setSelectedMemoId(memo.id);
+    },
+  });
+
+  const emptyTrashMutation = useMutation({
+    mutationFn: async () => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      return client.emptyTrash();
+    },
+    onSuccess: async () => {
+      await invalidateWorkspace();
+      setSelectedMemoId(null);
+    },
+  });
+
+  const handleTogglePin = (memo: MemoDetail) => {
+    updateMemoMutation.mutate({ memo, payload: { isPinned: !memo.isPinned } });
+  };
+
+  const handleDeleteMemo = (memo: MemoDetail) => {
+    Alert.alert(memoView === "trash" ? "永久删除笔记？" : "删除笔记？", memoView === "trash" ? "此操作不可撤销。" : "笔记会移动到回收站。", [
+      { text: "取消", style: "cancel" },
+      {
+        text: memoView === "trash" ? "永久删除" : "删除",
+        style: "destructive",
+        onPress: () => deleteMemoMutation.mutate({ memo, permanent: memoView === "trash" }),
+      },
+    ]);
+  };
+
+  const handleEmptyTrash = () => {
+    Alert.alert("清空回收站？", "回收站中的笔记会被永久删除，此操作不可撤销。", [
+      { text: "取消", style: "cancel" },
+      {
+        text: "清空",
+        style: "destructive",
+        onPress: () => emptyTrashMutation.mutate(),
+      },
+    ]);
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>EdgeEver</Text>
-          <Text numberOfLines={1} style={styles.instance}>
-            {session?.baseUrl}
-          </Text>
-        </View>
+      <AppHeader instance={session?.baseUrl ?? ""} onRefresh={refresh} onSignOut={signOut} />
 
-        <View style={styles.headerActions}>
-          <Pressable accessibilityRole="button" onPress={refresh} style={styles.iconButton}>
-            <RefreshCw color="#0f172a" size={18} />
-          </Pressable>
-          <Pressable accessibilityRole="button" onPress={signOut} style={styles.iconButton}>
-            <LogOut color="#0f172a" size={18} />
-          </Pressable>
-        </View>
+      {activeView === "notes" ? (
+        <NotesView
+          activeNotebook={activeNotebook}
+          activeNotebookId={activeNotebookId}
+          isLoading={memosQuery.isLoading}
+          isRefreshing={isRefreshing}
+          memoCount={memosQuery.data?.totalCount ?? memos.length}
+          memoFilterMode={memoFilterMode}
+          memoSortMode={memoSortMode}
+          memoView={memoView}
+          memos={memos}
+          notebooks={notebooks}
+          notebooksMemoCount={memoCount}
+          onCreate={() => setCreateOpen(true)}
+          onEmptyTrash={handleEmptyTrash}
+          onFilterModeChange={setMemoFilterMode}
+          onMemoPress={handleMemoPress}
+          onRefresh={refresh}
+          onSelectNotebook={setActiveNotebookId}
+          onSetMemoView={setMemoView}
+          onSortModeChange={setMemoSortMode}
+          error={memosQuery.error}
+          isError={memosQuery.isError}
+          isEmptyingTrash={emptyTrashMutation.isPending}
+        />
+      ) : null}
+
+      {activeView === "search" ? (
+        <SearchView
+          isLoading={searchQuery.isFetching}
+          isRefreshing={isRefreshing}
+          onMemoPress={handleMemoPress}
+          onRefresh={refresh}
+          results={searchResults}
+          searchText={searchText}
+          setSearchText={setSearchText}
+          totalCount={searchQuery.data?.totalCount ?? searchResults.length}
+        />
+      ) : null}
+
+      {activeView === "account" ? <AccountView instance={session?.baseUrl ?? ""} userName={session?.user?.username ?? "owner"} onSignOut={signOut} /> : null}
+      {activeView === "settings" ? <SettingsView notebookCount={notebooks.length} memoCount={memoCount} onOpenNotebookManager={() => setNotebookManagerOpen(true)} /> : null}
+
+      <MemoDetailModal
+        isDeleting={deleteMemoMutation.isPending}
+        isLoading={memoDetailQuery.isLoading}
+        isRestoring={restoreMemoMutation.isPending}
+        isSaving={updateMemoMutation.isPending}
+        memo={selectedMemo}
+        onClose={closeDetail}
+        onDelete={handleDeleteMemo}
+        onEdit={setEditingMemo}
+        onRestore={(memo) => restoreMemoMutation.mutate(memo)}
+        onTogglePin={handleTogglePin}
+        visible={Boolean(selectedMemoId)}
+      />
+
+      <EditMemoModal
+        memo={editingMemo}
+        notebooks={notebooks}
+        onClose={() => setEditingMemo(null)}
+        onSaved={(memo) => {
+          setEditingMemo(null);
+          setSelectedMemoId(memo.id);
+        }}
+        updateMutation={updateMemoMutation}
+      />
+
+      <NotebookManagerModal notebooks={notebooks} onClose={() => setNotebookManagerOpen(false)} visible={notebookManagerOpen} />
+
+      <CreateMemoModal
+        activeNotebookId={activeNotebookId}
+        notebooks={notebooks}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(memo) => {
+          setCreateOpen(false);
+          setActiveView("notes");
+          setSelectedMemoId(memo.id);
+        }}
+        visible={createOpen}
+      />
+
+      <View style={styles.bottomNav}>
+        <BottomNavItem
+          active={activeView === "notes"}
+          icon={<Home color={activeView === "notes" ? "#0f172a" : "#64748b"} size={20} />}
+          label="笔记"
+          onPress={() => setActiveView("notes")}
+        />
+        <BottomNavItem
+          active={activeView === "search"}
+          icon={<Search color={activeView === "search" ? "#0f172a" : "#64748b"} size={20} />}
+          label="搜索"
+          onPress={() => setActiveView("search")}
+        />
+        <BottomNavItem
+          active={activeView === "account"}
+          icon={<UserRound color={activeView === "account" ? "#0f172a" : "#64748b"} size={20} />}
+          label="账户"
+          onPress={() => setActiveView("account")}
+        />
+        <BottomNavItem
+          active={activeView === "settings"}
+          icon={<Settings color={activeView === "settings" ? "#0f172a" : "#64748b"} size={20} />}
+          label="设置"
+          onPress={() => setActiveView("settings")}
+        />
       </View>
+    </SafeAreaView>
+  );
+};
 
+const AppHeader = ({ instance, onRefresh, onSignOut }: { instance: string; onRefresh: () => void; onSignOut: () => void }) => (
+  <View style={styles.header}>
+    <View>
+      <Text style={styles.title}>EdgeEver</Text>
+      <Text numberOfLines={1} style={styles.instance}>
+        {instance}
+      </Text>
+    </View>
+
+    <View style={styles.headerActions}>
+      <IconButton onPress={onRefresh}>
+        <RefreshCw color="#0f172a" size={18} />
+      </IconButton>
+      <IconButton onPress={onSignOut}>
+        <LogOut color="#0f172a" size={18} />
+      </IconButton>
+    </View>
+  </View>
+);
+
+const NotesView = ({
+  activeNotebook,
+  activeNotebookId,
+  error,
+  isError,
+  isLoading,
+  isRefreshing,
+  memoCount,
+  memoFilterMode,
+  memoSortMode,
+  memoView,
+  memos,
+  notebooks,
+  notebooksMemoCount,
+  onCreate,
+  onEmptyTrash,
+  onFilterModeChange,
+  onMemoPress,
+  onRefresh,
+  onSelectNotebook,
+  onSetMemoView,
+  onSortModeChange,
+  isEmptyingTrash,
+}: {
+  activeNotebook: Notebook | null;
+  activeNotebookId: string;
+  error: unknown;
+  isError: boolean;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  memoCount: number;
+  memoFilterMode: MemoFilterMode;
+  memoSortMode: MemoSortMode;
+  memoView: MemoView;
+  memos: MemoSummary[];
+  notebooks: Notebook[];
+  notebooksMemoCount: number;
+  onCreate: () => void;
+  onEmptyTrash: () => void;
+  onFilterModeChange: (filterMode: MemoFilterMode) => void;
+  onMemoPress: (memoId: string) => void;
+  onRefresh: () => void;
+  onSelectNotebook: (notebookId: string) => void;
+  onSetMemoView: (memoView: MemoView) => void;
+  onSortModeChange: (sortMode: MemoSortMode) => void;
+  isEmptyingTrash: boolean;
+}) => (
+  <View style={styles.viewBody}>
+    {memoView === "notebook" ? (
       <View style={styles.tabs}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <NotebookPill
-            active={activeNotebookId === ALL_NOTES_ID}
-            label="全部笔记"
-            memoCount={notebooks.reduce((total, notebook) => total + notebook.memoCount, 0)}
-            onPress={() => setActiveNotebookId(ALL_NOTES_ID)}
-          />
+          <NotebookPill active={activeNotebookId === ALL_NOTES_ID} label="全部笔记" memoCount={notebooksMemoCount} onPress={() => onSelectNotebook(ALL_NOTES_ID)} />
           {notebooks.map((notebook) => (
             <NotebookPill
               active={activeNotebookId === notebook.id}
               key={notebook.id}
               label={notebook.name}
               memoCount={notebook.memoCount}
-              onPress={() => setActiveNotebookId(notebook.id)}
+              onPress={() => onSelectNotebook(notebook.id)}
             />
           ))}
         </ScrollView>
       </View>
+    ) : null}
 
-      <View style={styles.contentHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>{activeNotebook?.name ?? "全部笔记"}</Text>
-          <Text style={styles.sectionSubtitle}>{memosQuery.data?.totalCount ?? memos.length} 条笔记</Text>
-        </View>
-        <Pressable accessibilityRole="button" style={styles.primaryIconButton}>
-          <Plus color="#ffffff" size={20} />
+    <View style={styles.contentHeader}>
+      <View>
+        <Text style={styles.sectionTitle}>{memoView === "trash" ? "回收站" : activeNotebook?.name ?? "全部笔记"}</Text>
+        <Text style={styles.sectionSubtitle}>{memoCount} 条笔记</Text>
+      </View>
+      <View style={styles.contentActions}>
+        <Pressable accessibilityRole="button" onPress={() => onSetMemoView(memoView === "trash" ? "notebook" : "trash")} style={styles.secondaryIconButton}>
+          {memoView === "trash" ? <BookOpen color="#0f172a" size={18} /> : <Trash2 color="#0f172a" size={18} />}
         </Pressable>
+        {memoView === "notebook" ? (
+          <Pressable accessibilityRole="button" onPress={onCreate} style={styles.primaryIconButton}>
+            <Plus color="#ffffff" size={20} />
+          </Pressable>
+        ) : (
+          <Pressable
+            accessibilityRole="button"
+            disabled={isEmptyingTrash || memoCount === 0}
+            onPress={onEmptyTrash}
+            style={[styles.dangerIconButton, (isEmptyingTrash || memoCount === 0) && styles.buttonDisabled]}
+          >
+            <Trash2 color="#b91c1c" size={18} />
+          </Pressable>
+        )}
+      </View>
+    </View>
+
+    {memoView === "notebook" ? (
+      <View style={styles.listControls}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <OptionPill active={memoFilterMode === "all"} label="全部" onPress={() => onFilterModeChange("all")} />
+          <OptionPill active={memoFilterMode === "pinned"} label="置顶" onPress={() => onFilterModeChange(memoFilterMode === "pinned" ? "all" : "pinned")} />
+          <OptionPill active={memoFilterMode === "tagged"} label="有标签" onPress={() => onFilterModeChange(memoFilterMode === "tagged" ? "all" : "tagged")} />
+          <OptionPill active={memoFilterMode === "untagged"} label="无标签" onPress={() => onFilterModeChange(memoFilterMode === "untagged" ? "all" : "untagged")} />
+        </ScrollView>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <OptionPill active={memoSortMode === "updated-desc"} label="最近更新" onPress={() => onSortModeChange("updated-desc")} />
+          <OptionPill active={memoSortMode === "created-desc"} label="创建时间" onPress={() => onSortModeChange("created-desc")} />
+          <OptionPill active={memoSortMode === "title-asc"} label="标题 A-Z" onPress={() => onSortModeChange("title-asc")} />
+        </ScrollView>
+      </View>
+    ) : null}
+
+    <MemoList
+      emptyDescription={memoView === "trash" ? "删除的笔记会出现在这里" : "点右上角按钮创建第一条笔记"}
+      emptyTitle={memoView === "trash" ? "回收站为空" : "暂无笔记"}
+      error={error}
+      isError={isError}
+      isLoading={isLoading}
+      isRefreshing={isRefreshing}
+      memos={memos}
+      onMemoPress={onMemoPress}
+      onRefresh={onRefresh}
+    />
+  </View>
+);
+
+const SearchView = ({
+  isLoading,
+  isRefreshing,
+  onMemoPress,
+  onRefresh,
+  results,
+  searchText,
+  setSearchText,
+  totalCount,
+}: {
+  isLoading: boolean;
+  isRefreshing: boolean;
+  onMemoPress: (memoId: string) => void;
+  onRefresh: () => void;
+  results: MemoSummary[];
+  searchText: string;
+  setSearchText: (value: string) => void;
+  totalCount: number;
+}) => (
+  <View style={styles.viewBody}>
+    <View style={styles.searchHeader}>
+      <Text style={styles.sectionTitle}>搜索</Text>
+      <View style={styles.searchBox}>
+        <Search color="#64748b" size={18} />
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          onChangeText={setSearchText}
+          placeholder="搜索标题、正文或标签"
+          placeholderTextColor="#94a3b8"
+          style={styles.searchInput}
+          value={searchText}
+        />
+        {searchText ? (
+          <Pressable onPress={() => setSearchText("")}>
+            <X color="#64748b" size={18} />
+          </Pressable>
+        ) : null}
+      </View>
+      {searchText.trim() ? <Text style={styles.sectionSubtitle}>{totalCount} 条结果</Text> : null}
+    </View>
+
+    {searchText.trim() ? (
+      <MemoList
+        emptyDescription="换个关键词再试"
+        emptyTitle="没有找到匹配笔记"
+        isError={false}
+        isLoading={isLoading}
+        isRefreshing={isRefreshing}
+        memos={results}
+        onMemoPress={onMemoPress}
+        onRefresh={onRefresh}
+      />
+    ) : (
+      <View style={styles.centerState}>
+        <Search color="#94a3b8" size={32} />
+        <Text style={styles.emptyTitle}>输入关键词开始搜索</Text>
+        <Text style={styles.mutedText}>搜索会请求你的 EdgeEver 实例</Text>
+      </View>
+    )}
+  </View>
+);
+
+const AccountView = ({ instance, userName, onSignOut }: { instance: string; userName: string; onSignOut: () => void }) => (
+  <ScrollView contentContainerStyle={styles.panelList} style={styles.viewBody}>
+    <Text style={styles.sectionTitle}>账户</Text>
+    <PanelRow label="当前用户" value={userName} />
+    <PanelRow label="实例地址" value={instance} />
+    <Pressable onPress={onSignOut} style={styles.dangerButton}>
+      <LogOut color="#b91c1c" size={18} />
+      <Text style={styles.dangerButtonText}>退出登录</Text>
+    </Pressable>
+  </ScrollView>
+);
+
+const SettingsView = ({ memoCount, notebookCount, onOpenNotebookManager }: { memoCount: number; notebookCount: number; onOpenNotebookManager: () => void }) => (
+  <ScrollView contentContainerStyle={styles.panelList} style={styles.viewBody}>
+    <Text style={styles.sectionTitle}>设置</Text>
+    <Pressable onPress={onOpenNotebookManager}>
+      <PanelRow label="笔记本管理" value="创建、重命名、删除" />
+    </Pressable>
+    <PanelRow label="移动端形态" value="React Native" />
+    <PanelRow label="笔记本数量" value={String(notebookCount)} />
+    <PanelRow label="笔记总数" value={String(memoCount)} />
+    <PanelRow label="离线同步" value="待接入" />
+    <PanelRow label="富文本编辑器" value="待接入 WebView TipTap" />
+  </ScrollView>
+);
+
+const CreateMemoModal = ({
+  activeNotebookId,
+  notebooks,
+  onClose,
+  onCreated,
+  visible,
+}: {
+  activeNotebookId: string;
+  notebooks: Notebook[];
+  onClose: () => void;
+  onCreated: (memo: MemoDetail) => void;
+  visible: boolean;
+}) => {
+  const { client } = useSession();
+  const queryClient = useQueryClient();
+  const fallbackNotebookId = activeNotebookId !== ALL_NOTES_ID ? activeNotebookId : notebooks[0]?.id ?? "";
+  const [notebookId, setNotebookId] = useState(fallbackNotebookId);
+  const [title, setTitle] = useState("");
+  const [contentMarkdown, setContentMarkdown] = useState("");
+
+  useEffect(() => {
+    if (visible) {
+      setNotebookId(fallbackNotebookId);
+    }
+  }, [fallbackNotebookId, visible]);
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const targetNotebookId = notebookId || fallbackNotebookId;
+
+      if (!targetNotebookId) {
+        throw new Error("请先创建一个笔记本");
+      }
+
+      const response = await client.createMemo({
+        notebookId: targetNotebookId,
+        title: title.trim() || DEFAULT_MEMO_TITLE,
+        contentMarkdown: contentMarkdown.trim(),
+      });
+
+      return response.memo;
+    },
+    onSuccess: async (memo) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+      ]);
+      setTitle("");
+      setContentMarkdown("");
+      onCreated(memo);
+    },
+  });
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
+      <SafeAreaView style={styles.modalSafeArea}>
+        <View style={styles.modalHeader}>
+          <IconButton onPress={onClose}>
+            <X color="#0f172a" size={20} />
+          </IconButton>
+          <Text style={styles.modalTitle}>新建笔记</Text>
+          <IconButton onPress={() => createMutation.mutate()}>
+            {createMutation.isPending ? <ActivityIndicator color="#0f172a" /> : <Check color="#0f172a" size={20} />}
+          </IconButton>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.editorForm}>
+          <Text style={styles.label}>笔记本</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {notebooks.map((notebook) => (
+              <NotebookPill
+                active={(notebookId || fallbackNotebookId) === notebook.id}
+                key={notebook.id}
+                label={notebook.name}
+                memoCount={notebook.memoCount}
+                onPress={() => setNotebookId(notebook.id)}
+              />
+            ))}
+          </ScrollView>
+
+          <Text style={styles.label}>标题</Text>
+          <TextInput onChangeText={setTitle} placeholder={DEFAULT_MEMO_TITLE} placeholderTextColor="#94a3b8" style={styles.titleInput} value={title} />
+
+          <Text style={styles.label}>正文</Text>
+          <TextInput
+            multiline
+            onChangeText={setContentMarkdown}
+            placeholder="先用 Markdown 写入，后续接入移动 PWA 的 TipTap 编辑器"
+            placeholderTextColor="#94a3b8"
+            style={styles.markdownInput}
+            textAlignVertical="top"
+            value={contentMarkdown}
+          />
+
+          {createMutation.error ? (
+            <Text style={styles.errorText}>{createMutation.error instanceof Error ? createMutation.error.message : "创建失败"}</Text>
+          ) : null}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const NotebookManagerModal = ({ notebooks, onClose, visible }: { notebooks: Notebook[]; onClose: () => void; visible: boolean }) => {
+  const { client } = useSession();
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [editingNotebookId, setEditingNotebookId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+
+  const invalidateNotebooks = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
+      queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+    ]);
+  };
+
+  const createNotebookMutation = useMutation({
+    mutationFn: async () => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const trimmed = name.trim();
+
+      if (!trimmed) {
+        throw new Error("请输入笔记本名称");
+      }
+
+      return client.createNotebook({ name: trimmed });
+    },
+    onSuccess: async () => {
+      setName("");
+      await invalidateNotebooks();
+    },
+  });
+
+  const renameNotebookMutation = useMutation({
+    mutationFn: async ({ notebookId, nextName }: { notebookId: string; nextName: string }) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      const trimmed = nextName.trim();
+
+      if (!trimmed) {
+        throw new Error("请输入笔记本名称");
+      }
+
+      return client.updateNotebook(notebookId, { name: trimmed });
+    },
+    onSuccess: async () => {
+      setEditingNotebookId(null);
+      setEditingName("");
+      await invalidateNotebooks();
+    },
+  });
+
+  const deleteNotebookMutation = useMutation({
+    mutationFn: async (notebookId: string) => {
+      if (!client) {
+        throw new Error("Client is not ready");
+      }
+
+      return client.deleteNotebook(notebookId);
+    },
+    onSuccess: invalidateNotebooks,
+  });
+
+  const requestDeleteNotebook = (notebook: Notebook) => {
+    Alert.alert("删除笔记本？", `将删除“${notebook.name}”。如果服务端不允许删除非空笔记本，请先移动或删除其中笔记。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: () => deleteNotebookMutation.mutate(notebook.id),
+      },
+    ]);
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
+      <SafeAreaView style={styles.modalSafeArea}>
+        <View style={styles.modalHeader}>
+          <IconButton onPress={onClose}>
+            <X color="#0f172a" size={20} />
+          </IconButton>
+          <Text style={styles.modalTitle}>笔记本管理</Text>
+          <View style={styles.iconButtonPlaceholder} />
+        </View>
+
+        <ScrollView contentContainerStyle={styles.editorForm}>
+          <Text style={styles.label}>新建笔记本</Text>
+          <View style={styles.inlineForm}>
+            <TextInput onChangeText={setName} placeholder="笔记本名称" placeholderTextColor="#94a3b8" style={[styles.titleInput, styles.inlineInput]} value={name} />
+            <Pressable
+              disabled={createNotebookMutation.isPending}
+              onPress={() => createNotebookMutation.mutate()}
+              style={[styles.inlineButton, createNotebookMutation.isPending && styles.buttonDisabled]}
+            >
+              <Plus color="#ffffff" size={18} />
+            </Pressable>
+          </View>
+          {createNotebookMutation.error ? (
+            <Text style={styles.errorText}>{createNotebookMutation.error instanceof Error ? createNotebookMutation.error.message : "创建失败"}</Text>
+          ) : null}
+
+          <Text style={styles.label}>全部笔记本</Text>
+          {notebooks.map((notebook) => {
+            const editing = editingNotebookId === notebook.id;
+
+            return (
+              <View key={notebook.id} style={styles.notebookManageRow}>
+                {editing ? (
+                  <TextInput onChangeText={setEditingName} style={[styles.titleInput, styles.inlineInput]} value={editingName} />
+                ) : (
+                  <View style={styles.notebookManageText}>
+                    <Text numberOfLines={1} style={styles.panelValue}>
+                      {notebook.name}
+                    </Text>
+                    <Text style={styles.panelLabel}>{notebook.memoCount} 条笔记</Text>
+                  </View>
+                )}
+
+                {editing ? (
+                  <IconButton onPress={() => renameNotebookMutation.mutate({ notebookId: notebook.id, nextName: editingName })}>
+                    {renameNotebookMutation.isPending ? <ActivityIndicator color="#0f172a" /> : <Check color="#0f172a" size={18} />}
+                  </IconButton>
+                ) : (
+                  <IconButton
+                    onPress={() => {
+                      setEditingNotebookId(notebook.id);
+                      setEditingName(notebook.name);
+                    }}
+                  >
+                    <Pencil color="#0f172a" size={18} />
+                  </IconButton>
+                )}
+                <IconButton onPress={() => requestDeleteNotebook(notebook)}>
+                  <Trash2 color="#b91c1c" size={18} />
+                </IconButton>
+              </View>
+            );
+          })}
+          {renameNotebookMutation.error ? (
+            <Text style={styles.errorText}>{renameNotebookMutation.error instanceof Error ? renameNotebookMutation.error.message : "重命名失败"}</Text>
+          ) : null}
+          {deleteNotebookMutation.error ? (
+            <Text style={styles.errorText}>{deleteNotebookMutation.error instanceof Error ? deleteNotebookMutation.error.message : "删除失败"}</Text>
+          ) : null}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const MemoDetailModal = ({
+  isDeleting,
+  isLoading,
+  isRestoring,
+  isSaving,
+  memo,
+  onClose,
+  onDelete,
+  onEdit,
+  onRestore,
+  onTogglePin,
+  visible,
+}: {
+  isDeleting: boolean;
+  isLoading: boolean;
+  isRestoring: boolean;
+  isSaving: boolean;
+  memo: MemoDetail | null;
+  onClose: () => void;
+  onDelete: (memo: MemoDetail) => void;
+  onEdit: (memo: MemoDetail) => void;
+  onRestore: (memo: MemoDetail) => void;
+  onTogglePin: (memo: MemoDetail) => void;
+  visible: boolean;
+}) => (
+  <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={visible}>
+    <SafeAreaView style={styles.modalSafeArea}>
+      <View style={styles.modalHeader}>
+        <IconButton onPress={onClose}>
+          <X color="#0f172a" size={20} />
+        </IconButton>
+        <Text numberOfLines={1} style={styles.modalTitle}>
+          {memo?.title?.trim() || DEFAULT_MEMO_TITLE}
+        </Text>
+        <View style={styles.iconButtonPlaceholder} />
       </View>
 
-      {memosQuery.isLoading ? (
+      {isLoading ? (
         <View style={styles.centerState}>
           <ActivityIndicator color="#0f172a" />
         </View>
-      ) : memosQuery.isError ? (
-        <View style={styles.centerState}>
-          <Text style={styles.errorText}>加载失败</Text>
-          <Text style={styles.mutedText}>{memosQuery.error instanceof Error ? memosQuery.error.message : "请稍后再试"}</Text>
-        </View>
-      ) : (
-        <FlatList
-          contentContainerStyle={memos.length === 0 ? styles.emptyList : styles.list}
-          data={memos}
-          keyExtractor={(memo) => memo.id}
-          refreshControl={<RefreshControl onRefresh={refresh} refreshing={isRefreshing} tintColor="#0f172a" />}
-          renderItem={({ item }) => <MemoCard memo={item} onPress={() => setSelectedMemo(item)} selected={selectedMemo?.id === item.id} />}
-          ListEmptyComponent={
-            <View style={styles.centerState}>
-              <BookOpen color="#94a3b8" size={32} />
-              <Text style={styles.emptyTitle}>暂无笔记</Text>
-              <Text style={styles.mutedText}>点右上角按钮创建第一条笔记</Text>
+      ) : memo ? (
+        <ScrollView contentContainerStyle={styles.detailContent}>
+          <Text style={styles.detailTitle}>{memo.title?.trim() || DEFAULT_MEMO_TITLE}</Text>
+          <View style={styles.memoMeta}>
+            <Text style={styles.memoDate}>{formatDate(memo.updatedAt)}</Text>
+            <Text style={styles.memoDate}>修订 {memo.revision}</Text>
+          </View>
+          <View style={styles.actionRow}>
+            {memo.isDeleted ? (
+              <ActionButton disabled={isRestoring} label={isRestoring ? "恢复中" : "恢复"} onPress={() => onRestore(memo)}>
+                <RotateCcw color="#0f172a" size={16} />
+              </ActionButton>
+            ) : (
+              <>
+                <ActionButton disabled={isSaving} label={memo.isPinned ? "取消置顶" : "置顶"} onPress={() => onTogglePin(memo)}>
+                  <Pin color="#0f172a" size={16} />
+                </ActionButton>
+                <ActionButton label="编辑" onPress={() => onEdit(memo)}>
+                  <Pencil color="#0f172a" size={16} />
+                </ActionButton>
+              </>
+            )}
+            <ActionButton danger disabled={isDeleting} label={isDeleting ? "删除中" : memo.isDeleted ? "永久删除" : "删除"} onPress={() => onDelete(memo)}>
+              <Trash2 color="#b91c1c" size={16} />
+            </ActionButton>
+          </View>
+          {memo.tags.length ? (
+            <View style={styles.tagList}>
+              {memo.tags.map((tag) => (
+                <Text key={tag} style={styles.tag}>
+                  #{tag}
+                </Text>
+              ))}
             </View>
-          }
-        />
+          ) : null}
+          <Text style={styles.detailMarkdown}>{memo.contentMarkdown || memo.contentText || "没有正文内容"}</Text>
+        </ScrollView>
+      ) : (
+        <View style={styles.centerState}>
+          <Text style={styles.errorText}>笔记加载失败</Text>
+        </View>
       )}
-
-      {selectedMemo ? <MemoPreview memo={selectedMemo} /> : null}
-
-      <View style={styles.bottomNav}>
-        <BottomNavItem active icon={<Home color="#0f172a" size={20} />} label="笔记" />
-        <BottomNavItem icon={<Search color="#64748b" size={20} />} label="搜索" />
-        <BottomNavItem icon={<UserRound color="#64748b" size={20} />} label="账户" />
-        <BottomNavItem icon={<Settings color="#64748b" size={20} />} label="设置" />
-      </View>
     </SafeAreaView>
+  </Modal>
+);
+
+const EditMemoModal = ({
+  memo,
+  notebooks,
+  onClose,
+  onSaved,
+  updateMutation,
+}: {
+  memo: MemoDetail | null;
+  notebooks: Notebook[];
+  onClose: () => void;
+  onSaved: (memo: MemoDetail) => void;
+  updateMutation: UseMutationResult<
+    MemoDetail,
+    Error,
+    {
+      memo: MemoDetail;
+      payload: {
+        title?: string;
+        contentMarkdown?: string;
+        isPinned?: boolean;
+        notebookId?: string;
+        tags?: string[];
+      };
+    }
+  >;
+}) => {
+  const [title, setTitle] = useState("");
+  const [contentMarkdown, setContentMarkdown] = useState("");
+  const [notebookId, setNotebookId] = useState("");
+  const [tagsText, setTagsText] = useState("");
+
+  useEffect(() => {
+    if (memo) {
+      setTitle(memo.title?.trim() || "");
+      setContentMarkdown(memo.contentMarkdown || "");
+      setNotebookId(memo.notebookId);
+      setTagsText(memo.tags.join(", "));
+    }
+  }, [memo]);
+
+  const handleSave = () => {
+    if (!memo || updateMutation.isPending) {
+      return;
+    }
+
+    updateMutation.mutate(
+      {
+        memo,
+        payload: {
+          title: title.trim() || DEFAULT_MEMO_TITLE,
+          contentMarkdown,
+          notebookId,
+          tags: parseTags(tagsText),
+        },
+      },
+      {
+        onSuccess: onSaved,
+      }
+    );
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="pageSheet" visible={Boolean(memo)}>
+      <SafeAreaView style={styles.modalSafeArea}>
+        <View style={styles.modalHeader}>
+          <IconButton onPress={onClose}>
+            <X color="#0f172a" size={20} />
+          </IconButton>
+          <Text style={styles.modalTitle}>编辑笔记</Text>
+          <IconButton onPress={handleSave}>
+            {updateMutation.isPending ? <ActivityIndicator color="#0f172a" /> : <Check color="#0f172a" size={20} />}
+          </IconButton>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.editorForm}>
+          <Text style={styles.label}>笔记本</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {notebooks.map((notebook) => (
+              <NotebookPill
+                active={notebookId === notebook.id}
+                key={notebook.id}
+                label={notebook.name}
+                memoCount={notebook.memoCount}
+                onPress={() => setNotebookId(notebook.id)}
+              />
+            ))}
+          </ScrollView>
+
+          <Text style={styles.label}>标题</Text>
+          <TextInput onChangeText={setTitle} placeholder={DEFAULT_MEMO_TITLE} placeholderTextColor="#94a3b8" style={styles.titleInput} value={title} />
+
+          <Text style={styles.label}>标签</Text>
+          <TextInput onChangeText={setTagsText} placeholder="用逗号分隔标签" placeholderTextColor="#94a3b8" style={styles.titleInput} value={tagsText} />
+
+          <Text style={styles.label}>正文</Text>
+          <TextInput
+            multiline
+            onChangeText={setContentMarkdown}
+            placeholder="Markdown 正文"
+            placeholderTextColor="#94a3b8"
+            style={styles.markdownInput}
+            textAlignVertical="top"
+            value={contentMarkdown}
+          />
+
+          {updateMutation.error ? (
+            <Text style={styles.errorText}>{updateMutation.error instanceof Error ? updateMutation.error.message : "保存失败"}</Text>
+          ) : null}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const MemoList = ({
+  emptyDescription,
+  emptyTitle,
+  error,
+  isError,
+  isLoading,
+  isRefreshing,
+  memos,
+  onMemoPress,
+  onRefresh,
+}: {
+  emptyDescription: string;
+  emptyTitle: string;
+  error?: unknown;
+  isError: boolean;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  memos: MemoSummary[];
+  onMemoPress: (memoId: string) => void;
+  onRefresh: () => void;
+}) => {
+  if (isLoading) {
+    return (
+      <View style={styles.centerState}>
+        <ActivityIndicator color="#0f172a" />
+      </View>
+    );
+  }
+
+  if (isError) {
+    return (
+      <View style={styles.centerState}>
+        <Text style={styles.errorText}>加载失败</Text>
+        <Text style={styles.mutedText}>{error instanceof Error ? error.message : "请稍后再试"}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <FlatList
+      contentContainerStyle={memos.length === 0 ? styles.emptyList : styles.list}
+      data={memos}
+      keyExtractor={(memo) => memo.id}
+      refreshControl={<RefreshControl onRefresh={onRefresh} refreshing={isRefreshing} tintColor="#0f172a" />}
+      renderItem={({ item }) => <MemoCard memo={item} onPress={() => onMemoPress(item.id)} />}
+      ListEmptyComponent={
+        <View style={styles.centerState}>
+          <BookOpen color="#94a3b8" size={32} />
+          <Text style={styles.emptyTitle}>{emptyTitle}</Text>
+          <Text style={styles.mutedText}>{emptyDescription}</Text>
+        </View>
+      }
+    />
   );
 };
 
@@ -175,11 +1120,18 @@ const NotebookPill = ({
   </Pressable>
 );
 
-const MemoCard = ({ memo, onPress, selected }: { memo: MemoSummary; onPress: () => void; selected: boolean }) => (
-  <Pressable onPress={onPress} style={[styles.memoCard, selected && styles.memoCardSelected]}>
+const OptionPill = ({ active, label, onPress }: { active: boolean; label: string; onPress: () => void }) => (
+  <Pressable onPress={onPress} style={[styles.optionPill, active && styles.optionPillActive]}>
+    <Text style={[styles.optionPillText, active && styles.optionPillTextActive]}>{label}</Text>
+  </Pressable>
+);
+
+const MemoCard = ({ memo, onPress }: { memo: MemoSummary; onPress: () => void }) => (
+  <Pressable onPress={onPress} style={styles.memoCard}>
     <View style={styles.memoCardTop}>
+      <FileText color="#64748b" size={18} />
       <Text numberOfLines={1} style={styles.memoTitle}>
-        {memo.title?.trim() || "无标题笔记"}
+        {memo.title?.trim() || DEFAULT_MEMO_TITLE}
       </Text>
       {memo.isPinned ? <Text style={styles.pinText}>置顶</Text> : null}
     </View>
@@ -197,23 +1149,56 @@ const MemoCard = ({ memo, onPress, selected }: { memo: MemoSummary; onPress: () 
   </Pressable>
 );
 
-const MemoPreview = ({ memo }: { memo: MemoSummary }) => (
-  <View style={styles.preview}>
-    <Text numberOfLines={1} style={styles.previewTitle}>
-      {memo.title?.trim() || "无标题笔记"}
-    </Text>
-    <Text numberOfLines={3} style={styles.previewText}>
-      {memo.excerpt || "没有正文预览"}
+const PanelRow = ({ label, value }: { label: string; value: string }) => (
+  <View style={styles.panelRow}>
+    <Text style={styles.panelLabel}>{label}</Text>
+    <Text selectable style={styles.panelValue}>
+      {value}
     </Text>
   </View>
 );
 
-const BottomNavItem = ({ active = false, icon, label }: { active?: boolean; icon: ReactNode; label: string }) => (
-  <Pressable style={styles.bottomNavItem}>
+const IconButton = ({ children, onPress }: { children: ReactNode; onPress: () => void }) => (
+  <Pressable accessibilityRole="button" onPress={onPress} style={styles.iconButton}>
+    {children}
+  </Pressable>
+);
+
+const ActionButton = ({
+  children,
+  danger = false,
+  disabled = false,
+  label,
+  onPress,
+}: {
+  children: ReactNode;
+  danger?: boolean;
+  disabled?: boolean;
+  label: string;
+  onPress: () => void;
+}) => (
+  <Pressable disabled={disabled} onPress={onPress} style={[styles.actionButton, danger && styles.actionButtonDanger, disabled && styles.buttonDisabled]}>
+    {children}
+    <Text style={[styles.actionButtonText, danger && styles.actionButtonTextDanger]}>{label}</Text>
+  </Pressable>
+);
+
+const BottomNavItem = ({ active = false, icon, label, onPress }: { active?: boolean; icon: ReactNode; label: string; onPress: () => void }) => (
+  <Pressable onPress={onPress} style={styles.bottomNavItem}>
     {icon}
     <Text style={[styles.bottomNavText, active && styles.bottomNavTextActive]}>{label}</Text>
   </Pressable>
 );
+
+const parseTags = (value: string) =>
+  Array.from(
+    new Set(
+      value
+        .split(/[,，\n]/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    )
+  );
 
 const formatDate = (value: string) =>
   new Intl.DateTimeFormat("zh-CN", {
@@ -227,6 +1212,10 @@ const styles = StyleSheet.create({
   safeArea: {
     backgroundColor: "#f8fafc",
     flex: 1,
+  },
+  viewBody: {
+    flex: 1,
+    paddingBottom: 64,
   },
   header: {
     alignItems: "center",
@@ -258,6 +1247,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     height: 38,
     justifyContent: "center",
+    width: 38,
+  },
+  iconButtonPlaceholder: {
+    height: 38,
     width: 38,
   },
   tabs: {
@@ -303,6 +1296,34 @@ const styles = StyleSheet.create({
     paddingTop: 22,
     paddingBottom: 10,
   },
+  contentActions: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  searchHeader: {
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingTop: 22,
+    paddingBottom: 10,
+  },
+  searchBox: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 46,
+    paddingHorizontal: 12,
+  },
+  searchInput: {
+    color: "#0f172a",
+    flex: 1,
+    fontSize: 15,
+    minHeight: 44,
+  },
   sectionTitle: {
     color: "#0f172a",
     fontSize: 21,
@@ -321,13 +1342,61 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     width: 40,
   },
+  secondaryIconButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 40,
+    justifyContent: "center",
+    width: 40,
+  },
+  dangerIconButton: {
+    alignItems: "center",
+    backgroundColor: "#fef2f2",
+    borderColor: "#fecaca",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 40,
+    justifyContent: "center",
+    width: 40,
+  },
+  listControls: {
+    gap: 8,
+    paddingBottom: 10,
+    paddingHorizontal: 18,
+  },
+  optionPill: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    marginRight: 8,
+    minHeight: 34,
+    paddingHorizontal: 12,
+  },
+  optionPillActive: {
+    backgroundColor: "#e2e8f0",
+    borderColor: "#cbd5e1",
+  },
+  optionPillText: {
+    color: "#475569",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  optionPillTextActive: {
+    color: "#0f172a",
+  },
   list: {
-    paddingBottom: 150,
+    paddingBottom: 22,
     paddingHorizontal: 18,
   },
   emptyList: {
     flexGrow: 1,
-    paddingBottom: 150,
+    paddingBottom: 22,
   },
   memoCard: {
     backgroundColor: "#ffffff",
@@ -336,9 +1405,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 10,
     padding: 14,
-  },
-  memoCardSelected: {
-    borderColor: "#0f172a",
   },
   memoCardTop: {
     alignItems: "center",
@@ -365,6 +1431,7 @@ const styles = StyleSheet.create({
   memoMeta: {
     alignItems: "center",
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
     marginTop: 12,
   },
@@ -372,6 +1439,12 @@ const styles = StyleSheet.create({
     color: "#94a3b8",
     fontSize: 12,
     fontWeight: "600",
+  },
+  tagList: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 12,
   },
   tag: {
     backgroundColor: "#f1f5f9",
@@ -392,8 +1465,9 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: "#dc2626",
-    fontSize: 16,
-    fontWeight: "800",
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 20,
   },
   emptyTitle: {
     color: "#334155",
@@ -405,27 +1479,175 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
   },
-  preview: {
+  panelList: {
+    gap: 12,
+    padding: 18,
+    paddingBottom: 96,
+  },
+  panelRow: {
     backgroundColor: "#ffffff",
     borderColor: "#e2e8f0",
     borderRadius: 8,
     borderWidth: 1,
-    bottom: 78,
-    left: 18,
+    gap: 6,
     padding: 14,
-    position: "absolute",
-    right: 18,
   },
-  previewTitle: {
+  panelLabel: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  panelValue: {
     color: "#0f172a",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  dangerButton: {
+    alignItems: "center",
+    backgroundColor: "#fef2f2",
+    borderColor: "#fecaca",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "center",
+    minHeight: 48,
+  },
+  dangerButtonText: {
+    color: "#b91c1c",
     fontSize: 15,
     fontWeight: "800",
   },
-  previewText: {
-    color: "#475569",
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  modalSafeArea: {
+    backgroundColor: "#f8fafc",
+    flex: 1,
+  },
+  modalHeader: {
+    alignItems: "center",
+    borderBottomColor: "#e2e8f0",
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    padding: 14,
+  },
+  modalTitle: {
+    color: "#0f172a",
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "800",
+    marginHorizontal: 12,
+    textAlign: "center",
+  },
+  detailContent: {
+    padding: 18,
+    paddingBottom: 48,
+  },
+  detailTitle: {
+    color: "#0f172a",
+    fontSize: 24,
+    fontWeight: "800",
+    lineHeight: 30,
+  },
+  detailMarkdown: {
+    color: "#1f2937",
+    fontSize: 16,
+    lineHeight: 25,
+    marginTop: 20,
+  },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 16,
+  },
+  actionButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 38,
+    paddingHorizontal: 12,
+  },
+  actionButtonDanger: {
+    backgroundColor: "#fef2f2",
+    borderColor: "#fecaca",
+  },
+  actionButtonText: {
+    color: "#0f172a",
     fontSize: 13,
-    lineHeight: 19,
-    marginTop: 6,
+    fontWeight: "800",
+  },
+  actionButtonTextDanger: {
+    color: "#b91c1c",
+  },
+  inlineForm: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  inlineInput: {
+    flex: 1,
+  },
+  inlineButton: {
+    alignItems: "center",
+    backgroundColor: "#0f172a",
+    borderRadius: 8,
+    height: 48,
+    justifyContent: "center",
+    width: 48,
+  },
+  notebookManageRow: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 58,
+    padding: 10,
+  },
+  notebookManageText: {
+    flex: 1,
+    gap: 4,
+    minWidth: 0,
+  },
+  editorForm: {
+    gap: 12,
+    padding: 18,
+    paddingBottom: 48,
+  },
+  label: {
+    color: "#334155",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  titleInput: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    color: "#0f172a",
+    fontSize: 17,
+    minHeight: 48,
+    paddingHorizontal: 14,
+  },
+  markdownInput: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e2e8f0",
+    borderRadius: 8,
+    borderWidth: 1,
+    color: "#0f172a",
+    fontSize: 16,
+    lineHeight: 23,
+    minHeight: 260,
+    padding: 14,
   },
   bottomNav: {
     alignItems: "center",
